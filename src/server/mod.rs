@@ -200,6 +200,9 @@ where
         &'a Query,
     ) -> Pin<Box<dyn Future<Output = crate::error::Result<ApiResponse>> + Send + 'a>>,
 {
+    let path = uri.path().to_string();
+    let start = std::time::Instant::now();
+
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok());
@@ -207,8 +210,14 @@ where
     let query = extract_merged_query(&headers, uri.query(), body, content_type).await;
 
     match api_fn(&state.client, &query).await {
-        Ok(resp) => build_success_response(resp),
-        Err(e) => build_error_response(e),
+        Ok(resp) => {
+            tracing::info!("{} -> {} ({:.1?})", path, resp.status, start.elapsed());
+            build_success_response(resp)
+        }
+        Err(e) => {
+            tracing::warn!("{} -> ERROR: {} ({:.1?})", path, e, start.elapsed());
+            build_error_response(e)
+        }
     }
 }
 
@@ -324,7 +333,7 @@ pub async fn start_server(config: ServerConfig) {
         .await
         .expect("Failed to bind address");
 
-    println!("NCM API Server listening on http://{}", addr);
+    tracing::info!("NCM API Server listening on http://{}", addr);
 
     axum::serve(listener, app)
         .await

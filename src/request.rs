@@ -23,6 +23,18 @@ static SPECIAL_STATUS_CODES: LazyLock<std::collections::HashSet<i64>> =
 static DEVICE_ID: LazyLock<String> = LazyLock::new(generate_device_id);
 /// 全局 WNMCID
 static WNMCID: LazyLock<String> = LazyLock::new(generate_wnmcid);
+/// Cookie Domain 移除正则（编译一次，全局复用）
+static DOMAIN_REGEX: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"\s*Domain=[^;]+;?").unwrap());
+
+/// 安全创建 HeaderValue，无效字符会被过滤
+fn header_value(s: &str) -> HeaderValue {
+    HeaderValue::from_str(s).unwrap_or_else(|_| {
+        // 过滤掉非 ASCII 可见字符
+        let safe: String = s.chars().filter(|c| c.is_ascii() && !c.is_ascii_control()).collect();
+        HeaderValue::from_str(&safe).unwrap_or_else(|_| HeaderValue::from_static(""))
+    })
+}
 
 /// 加密类型
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -85,13 +97,14 @@ pub struct ApiClient {
     pub(crate) client: reqwest::Client,
     cookie: Option<String>,
     anonymous_token: Option<String>,
+    /// 自定义设备 ID，None 则使用全局默认值
+    device_id: Option<String>,
 }
 
 impl ApiClient {
     /// 创建新的 API 客户端
     pub fn new(cookie: Option<String>) -> Self {
         let client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
             .build()
             .expect("Failed to create HTTP client");
 
@@ -99,7 +112,25 @@ impl ApiClient {
             client,
             cookie,
             anonymous_token: None,
+            device_id: None,
         }
+    }
+
+    /// 创建带代理的 API 客户端
+    pub fn with_proxy(cookie: Option<String>, proxy_url: &str) -> Result<Self> {
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|e| NcmError::Unknown(format!("Invalid proxy URL: {}", e)))?;
+        let client = reqwest::Client::builder()
+            .proxy(proxy)
+            .build()
+            .map_err(NcmError::Http)?;
+
+        Ok(Self {
+            client,
+            cookie,
+            anonymous_token: None,
+            device_id: None,
+        })
     }
 
     /// 设置 cookie
@@ -110,6 +141,18 @@ impl ApiClient {
     /// 设置匿名 token
     pub fn set_anonymous_token(&mut self, token: String) {
         self.anonymous_token = Some(token);
+    }
+
+    /// 设置自定义设备 ID
+    ///
+    /// 不同客户端实例可使用不同设备 ID，避免共享全局 ID 触发风控
+    pub fn set_device_id(&mut self, device_id: String) {
+        self.device_id = Some(device_id);
+    }
+
+    /// 获取当前设备 ID（自定义优先，否则使用全局默认）
+    fn get_device_id(&self) -> &str {
+        self.device_id.as_deref().unwrap_or(&DEVICE_ID)
     }
 
     /// 发起 API 请求 - 核心方法
@@ -134,8 +177,10 @@ impl ApiClient {
             });
 
         if let Some(ref ip) = ip {
-            headers.insert("X-Real-IP", HeaderValue::from_str(ip).unwrap());
-            headers.insert("X-Forwarded-For", HeaderValue::from_str(ip).unwrap());
+            if let (Ok(real_ip), Ok(fwd)) = (HeaderValue::from_str(ip), HeaderValue::from_str(ip)) {
+                headers.insert("X-Real-IP", real_ip);
+                headers.insert("X-Forwarded-For", fwd);
+            }
         }
 
         // Cookie 处理
@@ -157,13 +202,12 @@ impl ApiClient {
         cookie_map
             .entry("ntes_kaola_ad".to_string())
             .or_insert_with(|| "1".to_string());
-        let nuid_clone = ntes_nuid.clone();
+        cookie_map
+            .entry("_ntes_nnid".to_string())
+            .or_insert_with(|| format!("{},{}", ntes_nuid, now_ts));
         cookie_map
             .entry("_ntes_nuid".to_string())
             .or_insert(ntes_nuid);
-        cookie_map
-            .entry("_ntes_nnid".to_string())
-            .or_insert_with(|| format!("{},{}", nuid_clone, now_ts));
         cookie_map
             .entry("WNMCID".to_string())
             .or_insert_with(|| WNMCID.clone());
@@ -175,7 +219,7 @@ impl ApiClient {
             .or_insert_with(|| os.osver.to_string());
         cookie_map
             .entry("deviceId".to_string())
-            .or_insert_with(|| DEVICE_ID.clone());
+            .or_insert_with(|| self.get_device_id().to_string());
         cookie_map
             .entry("os".to_string())
             .or_insert_with(|| os.os.to_string());
@@ -204,7 +248,7 @@ impl ApiClient {
 
         headers.insert(
             COOKIE,
-            HeaderValue::from_str(&cookie_obj_to_string(&cookie_map)).unwrap(),
+            header_value(&cookie_obj_to_string(&cookie_map)),
         );
 
         // 确定加密方式
@@ -229,13 +273,13 @@ impl ApiClient {
                 let ref_domain = if domain.is_empty() { DOMAIN } else { domain };
                 headers.insert(
                     REFERER,
-                    HeaderValue::from_str(ref_domain).unwrap(),
+                    header_value(ref_domain),
                 );
                 let ua = options
                     .ua
                     .as_deref()
                     .unwrap_or_else(|| choose_user_agent("weapi", "pc"));
-                headers.insert(USER_AGENT, HeaderValue::from_str(ua).unwrap());
+                headers.insert(USER_AGENT, header_value(ua));
 
                 data["csrf_token"] = Value::String(csrf_token);
                 encrypt_data = crypto::weapi(&data);
@@ -246,7 +290,7 @@ impl ApiClient {
                     .ua
                     .as_deref()
                     .unwrap_or_else(|| choose_user_agent("linuxapi", "linux"));
-                headers.insert(USER_AGENT, HeaderValue::from_str(ua).unwrap());
+                headers.insert(USER_AGENT, header_value(ua));
 
                 let ref_domain = if domain.is_empty() { DOMAIN } else { domain };
                 let linux_data = serde_json::json!({
@@ -296,13 +340,13 @@ impl ApiClient {
                     .collect::<Vec<_>>()
                     .join("; ");
 
-                headers.insert(COOKIE, HeaderValue::from_str(&header_cookie_str).unwrap());
+                headers.insert(COOKIE, header_value(&header_cookie_str));
 
                 let ua = options
                     .ua
                     .as_deref()
                     .unwrap_or_else(|| choose_user_agent("api", "iphone"));
-                headers.insert(USER_AGENT, HeaderValue::from_str(ua).unwrap());
+                headers.insert(USER_AGENT, header_value(ua));
 
                 let api_domain = if domain.is_empty() { API_DOMAIN } else { domain };
 
@@ -348,18 +392,18 @@ impl ApiClient {
             HeaderValue::from_static("application/x-www-form-urlencoded"),
         );
 
-        // 构造请求
-        let request_builder = self.client.post(&url).headers(headers).body(body);
-
-        // 代理
-        if let Some(ref proxy_url) = options.proxy {
-            // 注意：reqwest Client 级别设置代理，这里仅作为提示
-            // 实际使用时，建议在 ApiClient::new 中配置代理
-            let _ = proxy_url; // TODO: 使用带代理的 client
-        }
-
-        // 发送请求
-        let response = request_builder.send().await?;
+        // 构造请求并发送（按需使用代理）
+        let response = if let Some(ref proxy_url) = options.proxy {
+            let proxy = reqwest::Proxy::all(proxy_url)
+                .map_err(|e| NcmError::Unknown(format!("Invalid proxy URL: {}", e)))?;
+            let proxy_client = reqwest::Client::builder()
+                .proxy(proxy)
+                .build()
+                .map_err(NcmError::Http)?;
+            proxy_client.post(&url).headers(headers).body(body).send().await?
+        } else {
+            self.client.post(&url).headers(headers).body(body).send().await?
+        };
 
         // 处理响应 cookie
         let resp_cookies: Vec<String> = response
@@ -369,8 +413,7 @@ impl ApiClient {
             .filter_map(|v| v.to_str().ok())
             .map(|s| {
                 // 移除 Domain 属性
-                let re = regex_lite::Regex::new(r"\s*Domain=[^;]+;?").unwrap();
-                re.replace_all(s, "").to_string()
+                DOMAIN_REGEX.replace_all(s, "").to_string()
             })
             .collect();
 

@@ -306,7 +306,7 @@ axum::serve(listener, app).await?;
 
 ## API 文档
 
-**完整接口文档请查看 [docs/API.md](docs/API.md)**，涵盖全部 371 个接口的详细参数说明和调用示例。
+**完整接口文档请查看 [docs/API.md](docs/API.md)**，涵盖全部接口的详细参数说明和调用示例。
 
 ### 接口速查表
 

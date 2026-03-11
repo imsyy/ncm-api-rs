@@ -10,14 +10,14 @@ impl ApiClient {
     /// 对应 /song/detail
     pub async fn song_detail(&self, query: &Query) -> Result<ApiResponse> {
         let ids = query.get_or("ids", "");
-        let c: Vec<String> = ids
+        let c: Vec<serde_json::Value> = ids
             .split(',')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .map(|id| format!(r#"{{"id":{}}}"#, id))
+            .map(|id| json!({"id": id.parse::<i64>().unwrap_or(0)}))
             .collect();
         let data = json!({
-            "c": format!("[{}]", c.join(","))
+            "c": serde_json::to_string(&c).unwrap_or_default()
         });
         self.request("/api/v3/song/detail", data, query.to_option(CryptoType::Weapi))
             .await

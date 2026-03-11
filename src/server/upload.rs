@@ -54,9 +54,16 @@ pub async fn handle_avatar_upload(
         ));
     };
 
+    let start = std::time::Instant::now();
     match state.client.avatar_upload(&query, data).await {
-        Ok(resp) => build_success_response(resp),
-        Err(e) => build_error_response(e),
+        Ok(resp) => {
+            tracing::info!("/avatar/upload -> {} ({:.1?})", resp.status, start.elapsed());
+            build_success_response(resp)
+        }
+        Err(e) => {
+            tracing::warn!("/avatar/upload -> ERROR: {} ({:.1?})", e, start.elapsed());
+            build_error_response(e)
+        }
     }
 }
 
@@ -109,12 +116,19 @@ pub async fn handle_voice_upload(
         ));
     };
 
+    let start = std::time::Instant::now();
     match state
         .client
         .voice_upload(&query, &file_name, data, file_mimetype.as_deref())
         .await
     {
-        Ok(resp) => build_success_response(resp),
-        Err(e) => build_error_response(e),
+        Ok(resp) => {
+            tracing::info!("/voice/upload -> {} ({:.1?})", resp.status, start.elapsed());
+            build_success_response(resp)
+        }
+        Err(e) => {
+            tracing::warn!("/voice/upload -> ERROR: {} ({:.1?})", e, start.elapsed());
+            build_error_response(e)
+        }
     }
 }

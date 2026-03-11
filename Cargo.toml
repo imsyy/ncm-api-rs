@@ -9,7 +9,7 @@ homepage = "https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced"
 
 [features]
 default = []
-server = ["axum", "tower", "tower-http"]
+server = ["axum", "tower", "tower-http", "tracing", "tracing-subscriber"]
 
 [dependencies]
 # HTTP
@@ -38,6 +38,8 @@ regex-lite = "0.1"
 axum = { version = "0.8", features = ["multipart"], optional = true }
 tower = { version = "0.5", optional = true }
 tower-http = { version = "0.6", features = ["cors"], optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 [[bin]]
 name = "ncm-server"
